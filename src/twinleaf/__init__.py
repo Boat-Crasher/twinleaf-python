@@ -3,8 +3,11 @@ import struct
 from types import SimpleNamespace
 
 class Device(_twinleaf.Device):
-    def __new__(cls, url=None, route=None):
-        return super().__new__(cls, url, route)
+    def __new__(cls, url=None, route=None, scan=True):
+        device = super().__new__(cls, url, route)
+        if scan:
+            device._scan_rpcs()
+        return device
 
     def __init__(self, url=None, route=None):
         super().__init__()
@@ -53,7 +56,7 @@ class Device(_twinleaf.Device):
                     return self.rpc(name, arg.encode()).decode()
         return method
 
-    def scan_rpcs(self):
+    def _scan_rpcs(self):
         n = int.from_bytes(self.rpc("rpc.listinfo", b""), "little")
         for i in range(n):
             res = self.rpc("rpc.listinfo", i.to_bytes(2, "little"))
