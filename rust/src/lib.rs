@@ -8,6 +8,7 @@ use ::twinleaf::*;
 struct PyIter {
     port: data::Device,
     n: Option<usize>,
+    columns: Vec<String>,
 }
 
 #[pymethods]
@@ -28,19 +29,23 @@ impl PyIter {
             }
         }
 
-        let sample = slf.port.next();
+        while dict.is_empty() {
+            let sample = slf.port.next();
 
-        let time = sample.timestamp_end().into_pyobject(slf.py())?;
-        dict.set_item("time", time)?;
-
-        for column in sample.columns {
-            let name = column.desc.name.clone().into_pyobject(slf.py())?;
-            match column.value {
-                data::ColumnData::Int(x)   => {dict.set_item(name, x.into_pyobject(slf.py())?)?}
-                data::ColumnData::UInt(x)  => {dict.set_item(name, x.into_pyobject(slf.py())?)?}
-                data::ColumnData::Float(x) => {dict.set_item(name, x.into_pyobject(slf.py())?)?}
-                _ => { dict.set_item(name, "UNKNOWN".into_pyobject(slf.py())?)? }
-            };
+            for column in &sample.columns {
+                let name = column.desc.name.clone().into_pyobject(slf.py())?;
+                let name_str: String = name.extract()?;
+                if slf.columns.is_empty() || slf.columns.contains(&name_str) {
+                    let time = sample.timestamp_end().into_pyobject(slf.py())?;
+                    dict.set_item("time", time)?;
+                    match column.value {
+                        data::ColumnData::Int(x)   => {dict.set_item(name, x.into_pyobject(slf.py())?)?}
+                        data::ColumnData::UInt(x)  => {dict.set_item(name, x.into_pyobject(slf.py())?)?}
+                        data::ColumnData::Float(x) => {dict.set_item(name, x.into_pyobject(slf.py())?)?}
+                        _ => { dict.set_item(name, "UNKNOWN".into_pyobject(slf.py())?)? }
+                    };
+                }
+            }
         }
         
         Ok(Some(dict.into()))
@@ -81,10 +86,10 @@ impl PyDevice {
         }
     }
 
-    fn samples<'py>(&self, _py: Python<'py>, n: Option<usize>) -> PyResult<PyIter> {
-        Ok(PyIter{port: data::Device::new(self.proxy.device_full(self.route.clone()).unwrap()), n: n})
+    #[pyo3(signature = (n=1, columns=None))]
+    fn samples<'py>(&self, _py: Python<'py>, n: Option<usize>, columns: Option<Vec<String>>) -> PyResult<PyIter> {
+        Ok(PyIter{port: data::Device::new(self.proxy.device_full(self.route.clone()).unwrap()), n: n, columns: columns.unwrap_or_default()})
     }
-
 }
 
 /// A Python module implemented in Rust. The name of this function must match

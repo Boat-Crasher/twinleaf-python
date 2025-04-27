@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 
 import twinleaf
-import IPython
 
 dev = twinleaf.Device()
 
-#dev.scan_rpcs()
-#IPython.embed()
-
-for sample in dev.samples(5):
+# columns = ["accel.x", "accel.y", "accel.z"]
+columns = []
+for sample in dev.samples(5, columns):
        print(sample)
