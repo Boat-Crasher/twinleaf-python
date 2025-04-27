@@ -1,15 +1,8 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyRuntimeError;
-use pyo3::types::{PyNone,PyBytes,PyString};
+use pyo3::types::{PyDict, PyBytes};
 use ::twinleaf::tio::*;
 use ::twinleaf::*;
-
-/*
-#[pyclass(name = "DataIterator", subclass)]
-struct PySample {
-
-}
-*/
 
 #[pyclass(name = "DataIterator", subclass)]
 struct PyIter {
@@ -23,65 +16,35 @@ impl PyIter {
         slf
     }
 
-    fn __next__(mut slf: PyRefMut<'_, Self>) -> Option<Vec<PyObject>> {
-        // TODO: blocking/nonblocking
+    fn __next__(mut slf: PyRefMut<'_, Self>) -> PyResult<Option<PyObject>> {
+        let dict = PyDict::new(slf.py());
+        
         if let Some(ctr) = slf.n {
             if ctr == 0 {
-                // TODO: figure out if we can Err here
                 // TODO: drop port
-                return None;
-                // Or how to return a vec or none
-                //PyNone::get_bound(py);
+                return Ok(None);
             } else {
                 slf.n = Some(ctr-1);
             }
         }
-        let sample = slf.port.next();
-        let mut ret = vec![];
-        ret.push(sample.timestamp_end().into_py(slf.py()));
-        for column in sample.columns {
-            let mut col = vec![];
-            col.push(match column.value {
-                data::ColumnData::Int(x) => {x.to_object(slf.py())}
-                data::ColumnData::UInt(x) => {x.to_object(slf.py())}
-                data::ColumnData::Float(x) => {x.to_object(slf.py())}
-                _ => { "UNKNOWN".to_object(slf.py()) }
-                //_ => {Py::<PyNone>::from_borrowed_ptr(PyNone::get_bound(py))}
-            });
-            col.push(column.desc.name.to_object(slf.py()));
-            ret.push(col.to_object(slf.py()));
-        }
-        Some(ret)
-    }
 
-    /*
-    fn read_next<'py>(&mut self, py: Python<'py>, blocking: bool) -> PyResult<Vec<PyObject>> {
-        // TODO: blocking/nonblocking
-        if let Some(ctr) = self.n {
-            if ctr == 0 {
-                // TODO: figure out if we can Err here
-                return Ok(vec![]);
-                // Or how to return a vec or none
-                //PyNone::get_bound(py);
-            } else {
-                self.n = Some(ctr-1);
-            }
-        }
-        let sample = self.port.next();
-        let mut ret = vec![];
-        ret.push(sample.timestamp_end().into_py(py));
+        let sample = slf.port.next();
+
+        let time = sample.timestamp_end().into_pyobject(slf.py())?;
+        dict.set_item("time", time)?;
+
         for column in sample.columns {
-            ret.push(match column.value {
-                data::ColumnData::Int(x) => {x.to_object(py)}
-                data::ColumnData::UInt(x) => {x.to_object(py)}
-                data::ColumnData::Float(x) => {x.to_object(py)}
-                _ => { "UNKNOWN".to_object(py) }
-                //_ => {Py::<PyNone>::from_borrowed_ptr(PyNone::get_bound(py))}
-            })
+            let name = column.desc.name.clone().into_pyobject(slf.py())?;
+            match column.value {
+                data::ColumnData::Int(x)   => {dict.set_item(name, x.into_pyobject(slf.py())?)?}
+                data::ColumnData::UInt(x)  => {dict.set_item(name, x.into_pyobject(slf.py())?)?}
+                data::ColumnData::Float(x) => {dict.set_item(name, x.into_pyobject(slf.py())?)?}
+                _ => { dict.set_item(name, "UNKNOWN".into_pyobject(slf.py())?)? }
+            };
         }
-        Ok(ret)
+        
+        Ok(Some(dict.into()))
     }
-    */
 }
 
 #[pyclass(name = "Device", subclass)]
@@ -113,65 +76,23 @@ impl PyDevice {
 
     fn rpc<'py>(&self, py: Python<'py>, name: &str, req: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         match self.rpc.raw_rpc(name, req) {
-            Ok(ret) => Ok(PyBytes::new_bound(py,&ret[..])),
+            Ok(ret) => Ok(PyBytes::new(py,&ret[..])),
             _ => Err(PyRuntimeError::new_err("RPC failed")),
         }
     }
 
-    fn samples<'py>(&self, py: Python<'py>, n: Option<usize>) -> PyResult<PyIter> {
+    fn samples<'py>(&self, _py: Python<'py>, n: Option<usize>) -> PyResult<PyIter> {
         Ok(PyIter{port: data::Device::new(self.proxy.device_full(self.route.clone()).unwrap()), n: n})
     }
-    /*
-     *             let device = proxy.device_full(route).unwrap();
-    let mut device = Device::new(device);
 
-        let proxy = proxy::Port::new(&root, None, None);
-        let (tx, rx) = proxy.port(None, route.clone(), true, false).unwrap();
-        let device = util::DeviceRpc::new(&proxy, Some(route));
-        println!("CREATED RPC PORT");
-        Ok(PyRpc{port: proxy, dev: device, tx: tx, rx: rx})
-
-    */
-    /*
-    fn read_start(&self) {
-        // Just drain the rx queue
-        loop {
-            if let Err(x) = self.rx.try_recv() {
-                println!("Drain fail: {}", x);
-                break;
-            }
-        }
-    }
-
-    fn read_next<'py>(&self, py: Python<'py>, blocking: bool) -> PyResult<Vec<PyObject>> {
-        loop {
-            match self.rx.recv() {
-                Ok(pkt) => {
-                    if let proto::Payload::StreamData(sample) = pkt.payload {
-                        return Ok(vec!(
-                            sample.sample_n.into_py(py),
-                            f32::from_le_bytes([sample.data[0], sample.data[1], sample.data[2], sample.data[3]]).to_object(py),
-                            PyBytes::new_bound(py,&sample.data[..]).to_object(py))
-                        );
-                    }
-                },
-                Err(x) => {
-                    return Err(PyRuntimeError::new_err(format!("Read failed: {}", x)));
-                }
-            }
-        }
-    }
-*/
 }
 
 /// A Python module implemented in Rust. The name of this function must match
 /// the `lib.name` setting in the `Cargo.toml`, else Python will not be able to
 /// import the module.
 #[pymodule]
-fn _twinleaf(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    //m.add_function(wrap_pyfunction!(sum_as_string, m)?)?;
+fn _twinleaf(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDevice>()?;
-    //m.add_class::<PyIter>()?;
     Ok(())
 }
 
