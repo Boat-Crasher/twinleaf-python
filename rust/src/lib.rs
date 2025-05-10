@@ -42,7 +42,7 @@ impl PyIter {
 
             for sample_column in &sample.columns {
                 let sample_column_name = sample_column.desc.name.clone();
-                let mut column_matches = slf.columns.is_empty() || slf.columns.iter().any(|c| {
+                let column_matches = slf.columns.is_empty() || slf.columns.iter().any(|c| {
                     if c.ends_with("*") {
                         // Remove * and check if sample_column_name starts with prefix
                         let prefix = &c[..c.len()-1];
@@ -142,7 +142,7 @@ impl PyDevice {
 
         // Convert streams to dict
         let streams_dict = PyDict::new(py);
-        for (id, stream) in meta.streams {
+        for (_, stream) in meta.streams {
             let stream_dict = PyDict::new(py);
             stream_dict.set_item("stream_id", stream.stream.stream_id.to_string())?;
             // stream_dict.set_item("name", stream.name.to_string())?;
