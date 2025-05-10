@@ -1,13 +1,14 @@
-use pyo3::prelude::*;
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::types::{PyDict, PyBytes};
 use ::twinleaf::tio::*;
 use ::twinleaf::*;
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyDict};
 
 #[pyclass(name = "DataIterator", subclass)]
 struct PyIter {
     port: data::Device,
     n: Option<usize>,
+    stream: String,
     columns: Vec<String>,
 }
 
@@ -19,35 +20,58 @@ impl PyIter {
 
     fn __next__(mut slf: PyRefMut<'_, Self>) -> PyResult<Option<PyObject>> {
         let dict = PyDict::new(slf.py());
-        
+
         if let Some(ctr) = slf.n {
             if ctr == 0 {
                 // TODO: drop port
                 return Ok(None);
             } else {
-                slf.n = Some(ctr-1);
+                slf.n = Some(ctr - 1);
             }
         }
 
         while dict.is_empty() {
-            let sample = slf.port.next();
+            // Check for keyboard interrupt
+            slf.py().check_signals()?;
 
-            for column in &sample.columns {
-                let name = column.desc.name.clone().into_pyobject(slf.py())?;
-                let name_str: String = name.extract()?;
-                if slf.columns.is_empty() || slf.columns.contains(&name_str) {
+            let sample = slf.port.next();
+            
+            if !slf.stream.is_empty() && slf.stream != sample.stream.name {
+                continue;
+            }
+
+            for sample_column in &sample.columns {
+                let sample_column_name = sample_column.desc.name.clone();
+                let mut column_matches = slf.columns.is_empty() || slf.columns.iter().any(|c| {
+                    if c.ends_with("*") {
+                        // Remove * and check if sample_column_name starts with prefix
+                        let prefix = &c[..c.len()-1];
+                        sample_column_name.starts_with(prefix)
+                    } else {
+                        c.eq(&sample_column_name)
+                    }
+                });
+                if column_matches {
                     let time = sample.timestamp_end().into_pyobject(slf.py())?;
+                    let stream_id = sample.stream.stream_id.into_pyobject(slf.py())?;
+                    dict.set_item("stream", stream_id)?;
                     dict.set_item("time", time)?;
-                    match column.value {
-                        data::ColumnData::Int(x)   => {dict.set_item(name, x.into_pyobject(slf.py())?)?}
-                        data::ColumnData::UInt(x)  => {dict.set_item(name, x.into_pyobject(slf.py())?)?}
-                        data::ColumnData::Float(x) => {dict.set_item(name, x.into_pyobject(slf.py())?)?}
-                        _ => { dict.set_item(name, "UNKNOWN".into_pyobject(slf.py())?)? }
+                    match sample_column.value {
+                        data::ColumnData::Int(x) => {
+                            dict.set_item(sample_column_name.into_pyobject(slf.py())?, x.into_pyobject(slf.py())?)?
+                        }
+                        data::ColumnData::UInt(x) => {
+                            dict.set_item(sample_column_name.into_pyobject(slf.py())?, x.into_pyobject(slf.py())?)?
+                        }
+                        data::ColumnData::Float(x) => {
+                            dict.set_item(sample_column_name.into_pyobject(slf.py())?, x.into_pyobject(slf.py())?)?
+                        }
+                        _ => dict.set_item(sample_column_name.into_pyobject(slf.py())?, "UNKNOWN".into_pyobject(slf.py())?)?,
                     };
                 }
             }
         }
-        
+
         Ok(Some(dict.into()))
     }
 }
@@ -76,19 +100,69 @@ impl PyDevice {
         };
         let proxy = proxy::Interface::new(&root);
         let rpc = proxy.device_rpc(route.clone()).unwrap();
-        Ok(PyDevice{proxy, route, rpc})
+        Ok(PyDevice { proxy, route, rpc })
     }
 
-    fn rpc<'py>(&self, py: Python<'py>, name: &str, req: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
+    fn _rpc<'py>(&self, py: Python<'py>, name: &str, req: &[u8]) -> PyResult<Bound<'py, PyBytes>> {
         match self.rpc.raw_rpc(name, req) {
-            Ok(ret) => Ok(PyBytes::new(py,&ret[..])),
-            _ => Err(PyRuntimeError::new_err("RPC failed")),
+            Ok(ret) => Ok(PyBytes::new(py, &ret[..])),
+            _ => Err(PyRuntimeError::new_err(format!("RPC '{}' failed", name))),
         }
     }
 
-    #[pyo3(signature = (n=1, columns=None))]
-    fn samples<'py>(&self, _py: Python<'py>, n: Option<usize>, columns: Option<Vec<String>>) -> PyResult<PyIter> {
-        Ok(PyIter{port: data::Device::new(self.proxy.device_full(self.route.clone()).unwrap()), n: n, columns: columns.unwrap_or_default()})
+    #[pyo3(signature = (n=1, stream=None, columns=None))]
+    fn _samples<'py>(
+        &self,
+        _py: Python<'py>,
+        n: Option<usize>,
+        stream: Option<String>,
+        columns: Option<Vec<String>>,
+    ) -> PyResult<PyIter> {
+        Ok(PyIter {
+            port: data::Device::new(self.proxy.device_full(self.route.clone()).unwrap()),
+            n: n,
+            stream: stream.unwrap_or_default(),
+            columns: columns.unwrap_or_default(),
+        })
+    }
+
+    fn _get_metadata<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
+        let mut device = data::Device::new(self.proxy.device_full(self.route.clone()).unwrap());
+        let meta = device.get_metadata();
+
+        let dict = PyDict::new(py);
+
+        // Convert device metadata to dict
+        let device_dict = PyDict::new(py);
+        device_dict.set_item("serial_number", meta.device.serial_number.to_string())?;
+        device_dict.set_item("firmware_hash", meta.device.firmware_hash.to_string())?;
+        device_dict.set_item("session_id", meta.device.session_id.to_string())?;
+        device_dict.set_item("name", meta.device.name.to_string())?;
+        dict.set_item("device", device_dict)?;
+
+        // Convert streams to dict
+        let streams_dict = PyDict::new(py);
+        for (id, stream) in meta.streams {
+            let stream_dict = PyDict::new(py);
+            stream_dict.set_item("stream_id", stream.stream.stream_id.to_string())?;
+            // stream_dict.set_item("name", stream.name.to_string())?;
+
+            let columns_dict = PyDict::new(py);
+            for col in stream.columns {
+                let col_dict = PyDict::new(py);
+                col_dict.set_item("name", col.name.to_string())?;
+                col_dict.set_item("description", col.description.to_string())?;
+                col_dict.set_item("type", format!("{:?}", col.data_type))?;
+                col_dict.set_item("units", col.units.to_string())?;
+
+                columns_dict.set_item(col.name.to_string(), col_dict)?;
+            }
+            stream_dict.set_item("columns", columns_dict)?;
+            streams_dict.set_item(stream.stream.name.to_string(), stream_dict)?;
+        }
+        dict.set_item("streams", streams_dict)?;
+
+        Ok(dict.into())
     }
 }
 
@@ -100,4 +174,3 @@ fn _twinleaf(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDevice>()?;
     Ok(())
 }
-

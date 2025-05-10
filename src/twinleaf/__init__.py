@@ -3,77 +3,211 @@ import struct
 from types import SimpleNamespace
 
 class Device(_twinleaf.Device):
-    def __new__(cls, url=None, route=None, scan=True):
+    def __new__(cls, url=None, route=None):
         device = super().__new__(cls, url, route)
-        if scan:
-            device._scan_rpcs()
         return device
 
-    def __init__(self, url=None, route=None):
+    def __init__(self, url=None, route=None, instantiate=True):
         super().__init__()
+        if instantiate:
+            self._instantiate_rpcs()
+            self._instantiate_samples()
 
     def _rpc_int(self, name: str, size: int, signed: bool, value: int | None = None) -> int:
-        payload = b'' if value is None else value.to_bytes(size, signed=signed)
-        rep = self.rpc(name, payload)
-        return int.from_bytes(rep, signed=signed)
+        # print(name)
+        if signed:
+            match size:
+                case 1:
+                    fstr = '<b'
+                case 2:
+                    fstr = '<h'
+                case 4:
+                    fstr = '<i'
+        else:
+            match size:
+                case 1:
+                    fstr = '<B'
+                case 2:
+                    fstr = '<H'
+                case 4:
+                    fstr = '<I'
+        payload = b'' if value is None else struct.pack(fstr, value)
+        rep = self._rpc(name, payload)
+        return struct.unpack(fstr, rep)[0]
 
     def _rpc_float(self, name: str, size: int, value: float | None = None) -> float:
         fstr = '<f' if (size == 4) else '<d'
         payload = b'' if value is None else struct.pack(fstr, value)
-        rep = self.rpc(name, payload)
+        rep = self._rpc(name, payload)
         return struct.unpack(fstr, rep)[0]
 
-    def _get_method(self, name: str, meta: int):
+    def _get_rpc_obj(self, name: str, meta: int):
         data_type = (meta & 0xF)
         data_size = (meta >> 4) & 0xF
         if (meta & 0x8000) == 0:
-            def method(arg: bytes = b'') -> bytes:
-                return self.rpc(name, arg)
+            def rpc_method(local_self, arg: bytes = b'') -> bytes:
+                return self._rpc(name, arg)
         elif data_size == 0:
-            def method() -> None:
-                return self.rpc(name, b'')
+            def rpc_method(local_self) -> None:
+                return self._rpc(name, b'')
         elif data_type in (0, 1):
             signed = (data_type) == 1
             if (meta & 0x0200) == 0:
-                def method() -> int:
+                def rpc_method(local_self) -> int:
                     return self._rpc_int(name, data_size, signed)
             else:
-                def method(arg: int | None = None) -> int:
+                def rpc_method(local_self, arg: int | None = None) -> int:
                     return self._rpc_int(name, data_size, signed, arg)
         elif data_type == 2:
             if (meta & 0x0200) == 0:
-                def method() -> float:
+                def rpc_method(local_self) -> float:
                     return self._rpc_float(name, data_size)
             else:
-                def method(arg: float | None = None) -> float:
+                def rpc_method(local_self, arg: float | None = None) -> float:
                     return self._rpc_float(name, data_size, arg)
         elif data_type == 3:
             if (meta & 0x0200) == 0:
-                def method() -> str:
-                    return self.rpc(name, b'').decode()
+                def rpc_method(local_self) -> str:
+                    return self._rpc(name, b'').decode()
             else:
-                def method(arg: str | None = None) -> str:
-                    return self.rpc(name, arg.encode()).decode()
-        return method
+                def rpc_method(local_self, arg: str | None = None) -> str:
+                    return self._rpc(name, arg.encode()).decode()
+        cls = type('rpc',(), {'__name__':name, '__call__':rpc_method, '_data_type':data_type, '_data_size':data_size})
+        return cls
 
-    def _scan_rpcs(self):
-        n = int.from_bytes(self.rpc("rpc.listinfo", b""), "little")
+    def _get_obj_survey(self, name: str):
+        def survey(local_self):
+            survey = {}
+            for name, attr in local_self.__dict__.items():
+                if callable(attr):
+                    if hasattr(attr, '_data_type'):
+                        # don't call actions like reset, stop, etc.
+                        if attr._data_type > 0 or attr._data_size > 0:
+                            survey[attr.__name__] = attr()
+                    else:
+                        if attr.__class__.__name__ == 'survey':
+                            subsurvey = attr()
+                            survey = {**survey, **subsurvey}
+            return survey
+        cls = type('survey',(), {'__name__':name, '__call__':survey})
+        return cls
+
+    def _instantiate_rpcs(self):
+        n = int.from_bytes(self._rpc("rpc.listinfo", b""), "little")
+        cls = self._get_obj_survey(self)
+        setattr(self, 'settings', cls())
         for i in range(n):
-            res = self.rpc("rpc.listinfo", i.to_bytes(2, "little"))
+            res = self._rpc("rpc.listinfo", i.to_bytes(2, "little"))
             meta = int.from_bytes(res[0:2], "little")
             name = res[2:].decode()
 
             mname, *prefix = reversed(name.split("."))
-            parent = self
+            parent = self.settings
+            survey_prefix = ""
             if prefix and (prefix[-1] == "rpc"):
                 prefix[-1] = "_rpc"
             for token in reversed(prefix):
+                survey_prefix += "." + token
                 if not hasattr(parent, token):
-                    setattr(parent, token, SimpleNamespace())
+                    cls = self._get_obj_survey(token)
+                    setattr(parent, token, cls())
                 parent = getattr(parent, token)
 
-            setattr(parent, mname, self._get_method(name, meta))
+            cls = self._get_rpc_obj(name, meta)
+            setattr(parent, mname, cls())
 
+    def _samples_list(self, n: int = 1, stream: str = "", columns: list[str] = [], average: bool = False, concatenate: bool = False):
+        if n==1:
+            # single sample: dict of samples
+            sample = list(self._samples(n, stream=stream, columns=columns))[0]
+            # sample.pop("stream")
+            # sample.pop("time")
+            return sample
+        else:
+            samples = list(self._samples(n, stream=stream, columns=columns))
+            # bin into streams
+            streams = {}
+            for line in samples:
+                stream_id = line.pop("stream", None)
+                if stream_id not in streams:
+                    streams[stream_id] = { "stream": stream_id }
+                for key, value in line.items():
+                    if key not in streams[stream_id]:
+                        streams[stream_id][key] = []
+                    streams[stream_id][key].append(value)
+            if average:
+                # average down to dict of samples
+                for id in streams.keys():
+                    for key in streams[id].keys():
+                        if key != "stream":
+                            streams[id][key] = sum(streams[id][key]) / len(streams[id][key])
+
+            if concatenate:
+                raise NotImplementedError("Stream concatenation not yet implemented")
+
+            return streams
+                
+    def _get_obj_samples(self, name: str, stream: str = "", columns: list[str] = [], *args, **kwargs):
+        def samples_method(local_self, *args, **kwargs):
+            # print(f"Sampling {name} from stream {stream} with columns {columns}")
+            return self._samples_list(stream=stream, columns=columns, *args, **kwargs)
+        cls = type('samples'+name,(), {'__name__':name, '__call__':samples_method})
+        return cls
+
+    def _instantiate_samples(self):
+        metadata = self._get_metadata()
+        streams_flattened = []
+        for stream, value in metadata['streams'].items():
+            for column_name in value['columns'].keys():
+                streams_flattened.append(stream+"."+column_name)
+
+        # All samples        
+        cls = self._get_obj_samples("samples", stream="", columns=[])
+        setattr(self, 'samples', cls())
+
+        for stream_column in streams_flattened:
+            mname, *prefix, stream = reversed(stream_column.split("."))
+            parent = self.samples
+
+            if not hasattr(parent, stream):
+                # All samples for this stream
+                cls = self._get_obj_samples(stream, stream=stream, columns=[])
+                setattr(parent, stream, cls())
+            parent = getattr(parent, stream)
+
+            stream_prefix = ""
+            for token in reversed(prefix):
+                
+                stream_prefix += "." + token
+                if not hasattr(parent, token):
+                    #wildcard columns
+                    cls = self._get_obj_samples(token, stream=stream, columns=[stream_prefix[1:]+".*"])
+                    setattr(parent, token, cls())
+                parent = getattr(parent, token)
+
+            # specific stream samples
+            stream, column_name = stream_column.split(".",1)
+
+            cls = self._get_obj_samples(mname, stream=stream, columns=[column_name])
+            setattr(parent, mname, cls())
+
+    def _interact(self):
+        imported_objects = {}
+        imported_objects["tl"] = self
+        try:
+            import IPython
+            IPython.embed(
+                user_ns=imported_objects, 
+                banner1="", 
+                banner2="", # Use   : {self._shortname}.<tab>
+                exit_msg="",
+                enable_tip=False)
+        except ImportError:
+            import code
+            repl = code.InteractiveConsole(locals=imported_objects)
+            repl.interact(
+                banner = "", 
+                exitmsg = "")
 
 __doc__ = twinleaf.__doc__
 if hasattr(twinleaf, "__all__"):
