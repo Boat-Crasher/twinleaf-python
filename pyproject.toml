@@ -1,9 +1,8 @@
-[build-system]
-requires = ["maturin>=1.7,<2.0"]
-build-backend = "maturin"
-
 [project]
 name = "twinleaf"
+description = "Communications library and utilities for Twinleaf I/O (TIO) devices"
+long_description = "Twinleaf I/O is a serialization for kilohertz-rate data from data-intensive sensors connected by serial ports. This package makes it easy to access all the features on these devices by bulding a convenient, discoverable python object that reflects all the data streams and settings on the conneted device."
+
 requires-python = ">=3.10"
 classifiers = [
     "Topic :: System :: Hardware :: Hardware Drivers",
@@ -22,6 +21,10 @@ dependencies = [
 
 [project.scripts]
 itl = "twinleaf.itl:interact"
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
