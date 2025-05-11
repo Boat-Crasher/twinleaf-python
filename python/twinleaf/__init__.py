@@ -1,17 +1,17 @@
 import twinleaf._twinleaf
 import struct
-from types import SimpleNamespace
+from .itl import *
 
 class Device(_twinleaf.Device):
-    def __new__(cls, url=None, route=None):
+    def __new__(cls, url=None, route=None, announce=False, instantiate=True):
         device = super().__new__(cls, url, route)
         return device
 
-    def __init__(self, url=None, route=None, instantiate=True):
+    def __init__(self, url=None, route=None, announce=False, instantiate=True):
         super().__init__()
         if instantiate:
             self._instantiate_rpcs()
-            self._instantiate_samples()
+            self._instantiate_samples(announce)
 
     def _rpc_int(self, name: str, size: int, signed: bool, value: int | None = None) -> int:
         # print(name)
@@ -154,8 +154,11 @@ class Device(_twinleaf.Device):
         cls = type('samples'+name,(), {'__name__':name, '__call__':samples_method})
         return cls
 
-    def _instantiate_samples(self):
+    def _instantiate_samples(self, announce: bool = False):
         metadata = self._get_metadata()
+        dev_meta = metadata['device']
+        if announce:
+            print(f"{dev_meta['name']} ({dev_meta['serial_number']}) [{dev_meta['firmware_hash']}]")
         streams_flattened = []
         for stream, value in metadata['streams'].items():
             for column_name in value['columns'].keys():
